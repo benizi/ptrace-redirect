@@ -20,8 +20,8 @@
 
 static void process_signals(pid_t child);
 static int wait_for_open(pid_t child);
-static void read_file(pid_t child, char *file);
-static void redirect_file(pid_t child, const char *file);
+static void read_file(pid_t child, char *file, int reg);
+static void redirect_file(pid_t child, const char *file, int reg);
 
 int main(int argc, char **argv)
 {
@@ -34,12 +34,13 @@ int main(int argc, char **argv)
     }
 
     if ((pid = fork()) == 0) {
-        /* If open syscall, trace */
+        /* If syscall is open or openat, trace, otherwise allow it through */
         struct sock_filter filter[] = {
             BPF_STMT(BPF_LD+BPF_W+BPF_ABS, offsetof(struct seccomp_data, nr)),
-            BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_open, 0, 1),
-            BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_TRACE),
+            BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_open, 2, 0),
+            BPF_JUMP(BPF_JMP+BPF_JEQ+BPF_K, __NR_openat, 1, 0),
             BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_ALLOW),
+            BPF_STMT(BPF_RET+BPF_K, SECCOMP_RET_TRACE),
         };
         struct sock_fprog prog = {
             .filter = filter,
@@ -69,20 +70,22 @@ static void process_signals(pid_t child)
 {
     const char *file_to_redirect = "ONE.txt";
     const char *file_to_avoid = "TWO.txt";
+    int reg;
 
     while(1) {
         char orig_file[PATH_MAX];
 
-        /* Wait for open syscall start */
-        if (wait_for_open(child) != 0) break;
+        /* Wait for open/openat syscall start */
+        reg = wait_for_open(child);
+        if (!reg) break;
 
         /* Find out file and re-direct if it is the target */
 
-        read_file(child, orig_file);
+        read_file(child, orig_file, reg);
         printf("[Opening %s]\n", orig_file);
 
         if (strcmp(file_to_avoid, orig_file) == 0)
-            redirect_file(child, file_to_redirect);
+            redirect_file(child, file_to_redirect, reg);
     }
 }
 
@@ -94,22 +97,26 @@ static int wait_for_open(pid_t child)
         ptrace(PTRACE_CONT, child, 0, 0);
         waitpid(child, &status, 0);
         printf("[waitpid status: 0x%08x]\n", status);
-        /* Is it our filter for the open syscall? */
-        if (status >> 8 == (SIGTRAP | (PTRACE_EVENT_SECCOMP << 8)) &&
-            ptrace(PTRACE_PEEKUSER, child,
-                   sizeof(long)*ORIG_RAX, 0) == __NR_open)
-            return 0;
+        /* Is it our filter for the open/openat syscall? */
+        if (status >> 8 == (SIGTRAP | (PTRACE_EVENT_SECCOMP << 8))) {
+            switch (ptrace(PTRACE_PEEKUSER, child, sizeof(long)*ORIG_RAX, 0)) {
+                /* open(char*, ...) - in %rdi */
+                case __NR_open: return RDI;
+                /* openat(int, char*, ...) - in %rsi */
+                case __NR_openat: return RSI;
+            }
+        }
         if (WIFEXITED(status))
-            return 1;
+            return 0;
     }
 }
 
-static void read_file(pid_t child, char *file)
+static void read_file(pid_t child, char *file, int reg)
 {
     char *child_addr;
     int i;
 
-    child_addr = (char *) ptrace(PTRACE_PEEKUSER, child, sizeof(long)*RDI, 0);
+    child_addr = (char *) ptrace(PTRACE_PEEKUSER, child, sizeof(long)*reg, 0);
 
     do {
         long val;
@@ -130,7 +137,7 @@ static void read_file(pid_t child, char *file)
     } while (i == sizeof (long));
 }
 
-static void redirect_file(pid_t child, const char *file)
+static void redirect_file(pid_t child, const char *file, int reg)
 {
     char *stack_addr, *file_addr;
 
@@ -154,5 +161,5 @@ static void redirect_file(pid_t child, const char *file)
     } while (*file);
 
     /* Change argument to open */
-    ptrace(PTRACE_POKEUSER, child, sizeof(long)*RDI, file_addr);
+    ptrace(PTRACE_POKEUSER, child, sizeof(long)*reg, file_addr);
 }
