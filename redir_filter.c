@@ -18,6 +18,15 @@
 #include <linux/seccomp.h>
 #include <linux/unistd.h>
 
+/* Default to no debug printf's */
+#ifndef DEBUG
+# define DEBUG 0
+#endif
+
+/* Categories for debug printf's: */
+#define DBG_NAME (1 << 0)
+#define DBG_WAIT (1 << 1)
+
 static void process_signals(pid_t child);
 static int wait_for_open(pid_t child);
 static void read_file(pid_t child, char *file, int reg);
@@ -82,7 +91,7 @@ static void process_signals(pid_t child)
         /* Find out file and re-direct if it is the target */
 
         read_file(child, orig_file, reg);
-        printf("[Opening %s]\n", orig_file);
+        if (DEBUG & DBG_NAME) printf("[Opening %s]\n", orig_file);
 
         if (strcmp(file_to_avoid, orig_file) == 0)
             redirect_file(child, file_to_redirect, reg);
@@ -96,7 +105,7 @@ static int wait_for_open(pid_t child)
     while (1) {
         ptrace(PTRACE_CONT, child, 0, 0);
         waitpid(child, &status, 0);
-        printf("[waitpid status: 0x%08x]\n", status);
+        if (DEBUG & DBG_WAIT) printf("[waitpid status: 0x%08x]\n", status);
         /* Is it our filter for the open/openat syscall? */
         if (status >> 8 == (SIGTRAP | (PTRACE_EVENT_SECCOMP << 8))) {
             switch (ptrace(PTRACE_PEEKUSER, child, sizeof(long)*ORIG_RAX, 0)) {
