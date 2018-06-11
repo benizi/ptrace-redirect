@@ -26,19 +26,43 @@
 /* Categories for debug printf's: */
 #define DBG_NAME (1 << 0)
 #define DBG_WAIT (1 << 1)
+#define DBG_ARGS (1 << 2)
 
 static void process_signals(pid_t child);
 static int wait_for_open(pid_t child);
 static void read_file(pid_t child, char *file, int reg);
 static void redirect_file(pid_t child, const char *file, int reg);
 
+static char *file_to_redirect;
+static char *file_to_avoid;
+
 int main(int argc, char **argv)
 {
     pid_t pid;
     int status;
+    int skip = 1;
+    char **file_arg;
 
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <prog> <arg1> ... <argN>\n", argv[0]);
+    file_to_redirect = "ONE.txt";
+    file_to_avoid = "TWO.txt";
+
+    while (skip < argc) {
+        file_arg = NULL;
+        switch (argv[skip][0]) {
+            case '+': file_arg = &file_to_redirect; break;
+            case '-': file_arg = &file_to_avoid; break;
+        }
+        if (file_arg == NULL) break;
+        if (DEBUG & DBG_ARGS) printf("[%s] -> [%s]\n", *file_arg, argv[skip]);
+        *file_arg = argv[skip] + 1;
+        skip++;
+    }
+
+    if (argc < 1 + skip) {
+        fprintf(stderr, "Usage: %s [options] prog [args]\n", argv[0]);
+        fprintf(stderr, "\nOptions:\n");
+        fprintf(stderr, "    -filename    filename to avoid\n");
+        fprintf(stderr, "    +filename    filename to redirect to\n");
         return 1;
     }
 
@@ -66,7 +90,7 @@ int main(int argc, char **argv)
             return 1;
         }
         kill(getpid(), SIGSTOP);
-        return execvp(argv[1], argv + 1);
+        return execvp(argv[skip], argv + skip);
     } else {
         waitpid(pid, &status, 0);
         ptrace(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_TRACESECCOMP);
@@ -77,8 +101,6 @@ int main(int argc, char **argv)
 
 static void process_signals(pid_t child)
 {
-    const char *file_to_redirect = "ONE.txt";
-    const char *file_to_avoid = "TWO.txt";
     int reg;
 
     while(1) {
